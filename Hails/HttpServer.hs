@@ -8,17 +8,19 @@
 module Hails.HttpServer ( secureHttpServer ) where
 
 import Data.ByteString.Base64
-import qualified Data.ByteString.Lazy.Char8 as L
-import qualified Data.ByteString.Char8 as C
-
+import qualified Data.ByteString.Lazy.Char8 as L8
+import qualified Data.ByteString.Char8 as S8
+import Data.Monoid (mempty)
 import Data.IterIO
 import Data.IterIO.Http
+import Data.IterIO.HttpRoute (runHttpRoute, routeName)
 import Data.IterIO.Server.TCPServer
 import Data.Functor ((<$>))
 
 import Hails.TCB.Types
 
 import Hails.IterIO.Conversions
+import Hails.IterIO.HailsRoute
 import DCLabel.TCB
 import LIO.DCLabel
 import LIO.MonadLIO hiding (liftIO)
@@ -26,39 +28,55 @@ import LIO.TCB
 import Network.Socket as Net
 
 
+type L = L8.ByteString
+type S = S8.ByteString
+
 -- | Given an 'App' return handler.
-httpApp :: AppReqHandler -> Inum L.ByteString L.ByteString DC ()
+httpApp :: AppReqHandler -> Inum L L DC ()
 httpApp lrh = mkInumM $ do
   req0 <- httpReqI
   appState <- getAppConf req0
   case appState of
     Left resp -> irun $ enumHttpResp resp
-    Right appC -> do
+    Right appC | isStaticReq appC -> do
+      resp <- liftI $ respondWithFS (appReq appC)
+      irun $ enumHttpResp resp
+
+               | otherwise -> do
       let userLabel = newDC (appUser appC) (<>)
           req = appReq appC
       -- Set current label to be public, clearance to the user's label
       -- and privilege to the app's privilege.
-      liftLIO $ do taint lpub 
+      liftLIO $ do taint lpub
                    lowerClr userLabel
                    setPrivileges (appPriv appC)
       -- TODO: catch exceptions
-      resp <- liftI $ inumHttpBody req .| lrh req
+      body <- inumHttpBody req .| pureI
+      resp <- liftLIO $ lrh req (labelTCB (newDC (<>) (appUser appC)) body)
       resultLabel <- liftLIO $ getLabel
-      irun $ enumHttpResp $ 
+      irun $ enumHttpResp $
         if resultLabel `leq` userLabel
-          then resp 
+          then resp
           else resp500 "App violated IFC" --TODO: add custom header
+  where isStaticReq appC | null . reqPathLst . appReq $ appC = False
+                         | otherwise =
+                            (head . reqPathLst . appReq $ appC)
+                            == "static"
+        respondWithFS req = do
+          let rh = runHttpRoute $ routeName "static" $ routeFileSys systemMimeMap (const mempty) "static"
+          inumHttpBody req .| rh req
 
 -- | Return a server, given a port number and app.
-secureHttpServer :: PortNumber -> AppReqHandler -> TCPServer L.ByteString DC
+secureHttpServer :: PortNumber -> AppReqHandler -> TCPServer L DC
 secureHttpServer port lrh = TCPServer port (httpApp lrh) dcServerAcceptor
   (\m -> fmap fst $ evalDC m)
 
 -- | Given a socket, return the to/from-browser pipes.
-dcServerAcceptor :: Net.Socket -> DC (Iter L.ByteString DC (), Onum L.ByteString DC ())
+dcServerAcceptor :: Net.Socket -> DC (Iter L DC (), Onum L DC ())
 dcServerAcceptor sock = do
   (iterIO, onumIO) <- ioTCB $ defaultServerAcceptor sock
-  return (iterIOtoIterLIO iterIO, onumIOtoOnumLIO onumIO)
+  s <- getTCB
+  return (iterIOtoIterLIO iterIO, inumIOtoInumLIO onumIO s)
 
 --
 -- Helper
@@ -74,28 +92,46 @@ getAppConf req0 = do
   case authRes of
     Left resp -> return . Left $ resp
     Right (user, req) ->
-      let u = principal $ user
-          n = C.unpack $ C.takeWhile (/= '.') $ reqHost req
-          p = createPrivTCB $ newPriv n
-      in return . Right $ AppConf { appUser = u
-                                  , appName = n
-                                  , appPriv = p
-                                  , appReq  = req }
+      let usrN  = principal $ user
+          appN  = S8.unpack . S8.takeWhile (/= '.') $ reqHost req
+          privs = createPrivTCB $ newPriv appN
+      in return . Right $ AppConf { appUser = usrN
+                                  , appName = appN
+                                  , appPriv = privs
+                                  , appReq  = modReq req appN}
+    where modReq req n =
+            HttpReq { reqMethod = reqMethod req
+                    , reqScheme = reqScheme req
+                    , reqPathParams = reqPathParams req
+                    , reqTransferEncoding = reqTransferEncoding req
+                    , reqPath = reqPath req
+                    , reqPathLst = reqPathLst req
+                    , reqPathCtx = reqPathCtx req
+                    , reqQuery = reqQuery req
+                    , reqHost = reqHost req
+                    , reqPort = reqPort req
+                    , reqVers = reqVers req
+                    , reqHeaders = ("x-hails-app", S8.pack n) : reqHeaders req
+                    , reqCookies = reqCookies req
+                    , reqContentType = reqContentType req
+                    , reqContentLength = reqContentLength req
+                    , reqIfModifiedSince = reqIfModifiedSince req
+                    , reqSession = ()
+                    }
 
 
 -- | Get the authenticated user information and remove and sensitive
 -- headers from request.
 tryAuthUser :: (Monad m, Monad m')
             => HttpReq s
-            -> m (Either (HttpResp m') (C.ByteString, HttpReq s))
+            -> m (Either (HttpResp m') (S, HttpReq s))
 tryAuthUser req = do
   case userFromReq of
     Nothing -> return . Left $ respAuthRequired
     Just user -> do
         return . Right $
-          ( user, req {
-              reqHeaders = filter ((/=authField) . fst) $ reqHeaders req
-                      })
+          let hdrs = filter ((/=authField) . fst) $ reqHeaders req
+          in (user, req { reqHeaders = ("x-hails-user", user) : hdrs })
   where authField = "authorization"
         -- No login, send an auth response-header:
         respAuthRequired =
@@ -104,6 +140,6 @@ tryAuthUser req = do
          in respAddHeader authHdr resp
         -- Get user information from request header:
         userFromReq  = let mAuthCode = lookup authField $ reqHeaders req
-                       in extractUser . (C.dropWhile (/= ' ')) <$> mAuthCode
-        extractUser b64u = C.takeWhile (/= ':') $ decodeLenient b64u
+                       in extractUser . (S8.dropWhile (/= ' ')) <$> mAuthCode
+        extractUser b64u = S8.takeWhile (/= ':') $ decodeLenient b64u
 

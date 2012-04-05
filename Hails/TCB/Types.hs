@@ -4,18 +4,21 @@
 #endif
 {-# LANGUAGE DeriveFunctor,
              GeneralizedNewtypeDeriving #-}
-             
+
 module Hails.TCB.Types ( AppName
                        , AppConf(..)
                        , AppReqHandler
                        , AppRoute
                        ) where
 
+import qualified Data.ByteString.Lazy as L
 import Data.IterIO.Http
 import Data.IterIO.HttpRoute
 
 import DCLabel.TCB
 import LIO.DCLabel
+
+type L = L.ByteString
 
 -- | Application name
 type AppName = String
@@ -29,10 +32,13 @@ data AppConf = AppConf { appUser :: !Principal
                          -- ^ The app's privileges.
                          , appReq  :: HttpReq ()
                          -- ^ The request message
-                         } deriving (Show)
+                         }
 
 -- | Application handler.
-type AppReqHandler = HttpRequestHandler DC ()
+type AppReqHandler = HttpReq ()
+                   -> DCLabeled L
+                   -> DC (HttpResp DC)
 
 -- | Application route.
 type AppRoute = HttpRoute DC ()
+

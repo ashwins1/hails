@@ -17,23 +17,34 @@ module Hails.Database.MongoDB ( module Hails.Data.LBson
                               , isSearchableField
                               , PolicyError(..)
                               , Action, getDatabase
+                              , Selection(..)
                               , Query(..)
                               , Cursor
-                              , DBConf(..)
+                              , DBConf
                               , DCAction
                               , dcAccess
                               , labelDatabase
+                              , DatabasePolicy(..)
+                              , PolicyGroup(..)
+                              , relabelGroupsP, relabelGroupsSafe
+                              , PrivilegeGrantGate(..)
                               -- * Query
-                              , insert, insert_, insertP, insertP_
-                              , findP
-                              , findOneP
+                              , insert, insert_
+                              , insertP, insertP_
+                              , save, saveP
+                              , deleteOne, deleteOneP
+                              , find, findP
+                              , findOne, findOneP
                               , next, nextP
+                              , select
                               -- * Misc
                               , Failure
+                              , labeledDocI
                               ) where
 
 import Hails.Database.MongoDB.TCB.Types
 import Hails.Database.MongoDB.TCB.Query
 import Hails.Database.MongoDB.TCB.DCAccess
-import Hails.Data.LBson hiding (sort)
+import Hails.Data.LBson hiding (sort, find)
+import Hails.Database.MongoDB.TCB.Convert
 
