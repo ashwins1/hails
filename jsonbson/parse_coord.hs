@@ -50,3 +50,14 @@ toBSON (J.Number (I int))
   | otherwise              = B.Int32 (fromInteger int)
 toBSON (J.Bool b) = B.Bool b
 toBSON (J.Object obj) = B.Doc ([(CS.pack $ T.unpack k) B.:= (toBSON v) | (k, v) <- HM.toList obj])
+
+(~) :: J.Value -> B.Value -> Bool --tests whether given JSON, BSON vals are isomorphic
+J.Null ~ B.Null = True
+(J.Array jarr) ~ (B.Array barr) = and $ ((V.length jarr) == (length barr)) : [jval ~ bval | jval <- V.toList jarr, bval <- barr]
+(J.Number (D dbl)) ~ (B.Float f) = dbl == f
+(J.Number (I _)) ~ (B.Int32 _) = True --maybe improve precision of this test by looking at value of int (should be < 1 << 32)
+(J.Number (I _)) ~ (B.Int64 _) = True --ditto
+(J.Number (I int)) ~ (B.String str) = (CS.unpack str) == (show int)
+(J.String jstr) ~ (B.String bstr) = (T.unpack jstr) == (CS.unpack bstr)
+(J.Bool jbool) ~ (B.Bool bbool) = jbool == bbool
+(J.Object obj) ~ (B.Doc doc) = 
